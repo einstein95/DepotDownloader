@@ -141,6 +141,11 @@ namespace DepotDownloader
                 return cachePath;
 
             cachePath = Path.Combine(manifestDir,
+                string.Format("{0}-manifest-{1}.manif5", depotId, manifestId));
+            if (File.Exists(cachePath))
+                return cachePath;
+
+            cachePath = Path.Combine(manifestDir,
                 depotId.ToString(),
                 "manifest",
                 string.Format("{0}.manif5", manifestId));
