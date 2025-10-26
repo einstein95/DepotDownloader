@@ -633,7 +633,9 @@ namespace DepotDownloader
             }
             */
 
-            if (!DepotKeyStore.ContainsKey(depotId) && !await AccountHasAccess(appId, depotId))
+            var isOwned = await AccountHasAccess(appId, depotId);
+
+            if (!isOwned && !DepotKeyStore.ContainsKey(depotId))
             {
                 Console.WriteLine("Depot {0} is not available from this account and no key found in depot key store.", depotId);
                 return null;
@@ -677,6 +679,13 @@ namespace DepotDownloader
             if (!CreateDirectories(depotId, uVersion, out var installDir))
             {
                 Console.WriteLine("Error: Unable to create install directories!");
+                return null;
+            }
+
+            var configDir = Path.Combine(installDir, CONFIG_DIR);
+            if (!isOwned && Util.LoadLocalManifest(configDir, depotId, manifestId) == null)
+            {
+                Console.WriteLine("Depot {0} is not available from this account and manifest {1} was not found in local storage.", depotId, manifestId);
                 return null;
             }
 
