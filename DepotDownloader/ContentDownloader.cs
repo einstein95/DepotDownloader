@@ -7,6 +7,7 @@ using System.Collections.Concurrent;
 using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net;
 using System.Threading;
@@ -420,6 +421,65 @@ namespace DepotDownloader
             }
         }
 
+        public static async Task DownloadDepotAsync(uint appId, List<(uint depotId, ulong manifestId)> depotManifestIds)
+        {
+            cdnPool = new CDNClientPool(steam3, appId);
+
+            // Load our configuration data containing the depots currently installed
+            var configPath = ContentDownloader.Config.InstallDirectory;
+            if (string.IsNullOrWhiteSpace(configPath))
+            {
+                configPath = DEFAULT_DOWNLOAD_DIR;
+            }
+
+            Directory.CreateDirectory(Path.Combine(configPath, CONFIG_DIR));
+            DepotConfigStore.LoadFromFile(Path.Combine(configPath, CONFIG_DIR, "depot.config"));
+
+            var infos = new List<DepotDownloadInfo>();
+
+            foreach (var depotManifest in depotManifestIds)
+            {
+                var depotId = depotManifest.depotId;
+                var manifestId = depotManifest.manifestId;
+
+                string installDir;
+                if (!CreateDirectories(depotId, 0, out installDir))
+                {
+                    throw new ContentDownloaderException("Error: Unable to create install directories!");
+                }
+
+                byte[] depotKey = null;
+
+                if (DepotKeyStore.ContainsKey(depotId))
+                {
+                    depotKey = DepotKeyStore.Get(depotId);
+                }
+                else if (appId != INVALID_APP_ID)
+                {
+                    await steam3.RequestDepotKey(depotId, appId);
+                    steam3.DepotKeys.TryGetValue(depotId, out depotKey);
+                }
+
+                if (depotKey == null)
+                {
+                    throw new ContentDownloaderException(String.Format("Key for depot {0} is not in depot store and cannot be fetched from servers.", depotId));
+                }
+
+                var info = new DepotDownloadInfo(depotId, appId, manifestId, "", installDir, depotKey);
+                infos.Add(info);
+            }
+
+            try
+            {
+                await DownloadSteam3Async(infos).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                Console.WriteLine("Depots were not completely downloaded.");
+                throw;
+            }
+        }
+
         private static async Task DownloadWebFile(uint appId, string fileName, string url)
         {
             if (!CreateDirectories(appId, 0, out var installDir))
@@ -467,6 +527,7 @@ namespace DepotDownloader
 
             await steam3?.RequestAppInfo(appId);
 
+            /*
             if (!await AccountHasAccess(appId, appId))
             {
                 if (steam3.steamUser.SteamID.AccountType != EAccountType.AnonUser && await steam3.RequestFreeAppLicense(appId))
@@ -482,6 +543,7 @@ namespace DepotDownloader
                     throw new ContentDownloaderException(string.Format("App {0} ({1}) is not available from this account.", appId, contentName));
                 }
             }
+            */
 
             var hasSpecificDepots = depotManifestIds.Count > 0;
             var depotIdsFound = new List<uint>();
@@ -606,10 +668,20 @@ namespace DepotDownloader
                 await steam3.RequestAppInfo(appId);
             }
 
+            /*
             if (!await AccountHasAccess(appId, depotId))
             {
                 Console.WriteLine("Depot {0} is not available from this account.", depotId);
 
+                return null;
+            }
+            */
+
+            var isOwned = await AccountHasAccess(appId, depotId);
+
+            if (!isOwned && !DepotKeyStore.ContainsKey(depotId))
+            {
+                Console.WriteLine("Depot {0} is not available from this account and no key found in depot key store.", depotId);
                 return null;
             }
 
@@ -630,11 +702,20 @@ namespace DepotDownloader
                 }
             }
 
-            await steam3.RequestDepotKey(depotId, appId);
-            if (!steam3.DepotKeys.TryGetValue(depotId, out var depotKey))
+            byte[] depotKey;
+
+            if (DepotKeyStore.ContainsKey(depotId))
             {
-                Console.WriteLine("No valid depot key for {0}, unable to download.", depotId);
-                return null;
+                depotKey = DepotKeyStore.Get(depotId);
+            }
+            else
+            {
+                await steam3.RequestDepotKey(depotId, appId);
+                if (!steam3.DepotKeys.TryGetValue(depotId, out depotKey))
+                {
+                    Console.WriteLine("No valid depot key for {0}, unable to download.", depotId);
+                    return null;
+                }
             }
 
             var uVersion = GetSteam3AppBuildNumber(appId, branch);
@@ -642,6 +723,13 @@ namespace DepotDownloader
             if (!CreateDirectories(depotId, uVersion, out var installDir))
             {
                 Console.WriteLine("Error: Unable to create install directories!");
+                return null;
+            }
+
+            var configDir = Path.Combine(installDir, CONFIG_DIR);
+            if (!isOwned && Util.LoadLocalManifest(configDir, depotId, manifestId) == null)
+            {
+                Console.WriteLine("Depot {0} is not available from this account and manifest {1} was not found in local storage.", depotId, manifestId);
                 return null;
             }
 
@@ -828,7 +916,8 @@ namespace DepotDownloader
                                 // If we could not get the manifest code, this is a fatal error
                                 if (manifestRequestCode == 0)
                                 {
-                                    cts.Cancel();
+                                    Console.WriteLine("No manifest request code was returned for {0} {1}", depot.DepotId, depot.ManifestId);
+                                    break;
                                 }
                             }
 
